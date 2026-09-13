@@ -191,6 +191,83 @@ class ConfigHealingTests(unittest.TestCase):
 
         self.assertEqual(instance._Config__config["accounts"], "")
 
+    def test_alpha2_profile_bitrates_are_healed_to_numbers(self):
+        # Alpha 2 wrote a profile's bitrate as text like "320k"; Beta 1 wants
+        # a whole number. A value that is neither known text nor a number
+        # (the "odd" profile here) falls back to 320, the same default the
+        # /profiles endpoint uses for a missing bitrate.
+        stored_profiles = [
+            {
+                "id": "mp3-320",
+                "name": "MP3 · 320 kbps",
+                "format": "mp3",
+                "bitrate": "320k",
+                "download_path": "",
+            },
+            {
+                "id": "flac",
+                "name": "FLAC · lossless",
+                "format": "flac",
+                "bitrate": "1411k",
+                "download_path": "",
+            },
+            {
+                "id": "odd",
+                "name": "Odd",
+                "format": "mp3",
+                "bitrate": "high",
+                "download_path": "",
+            },
+        ]
+        instance = self._load(
+            "healing-profile-bitrates",
+            {
+                "download_profiles": stored_profiles,
+                "active_download_profile": "flac",
+            },
+        )
+
+        profiles = instance.get("download_profiles")
+        bitrates = [profile["bitrate"] for profile in profiles]
+        self.assertEqual(bitrates, [320, 1411, 320])
+        for bitrate in bitrates:
+            self.assertIsInstance(bitrate, int)
+            self.assertNotIsInstance(bitrate, bool)
+        # Everything else about each profile is untouched, in order.
+        self.assertEqual([p["id"] for p in profiles], ["mp3-320", "flac", "odd"])
+        self.assertEqual([p["format"] for p in profiles], ["mp3", "flac", "mp3"])
+        self.assertEqual(
+            [p["name"] for p in profiles],
+            ["MP3 · 320 kbps", "FLAC · lossless", "Odd"],
+        )
+        self.assertEqual([p["download_path"] for p in profiles], ["", "", ""])
+        self.assertEqual(instance.get("active_download_profile"), "flac")
+
+    def test_profile_bitrate_that_is_already_a_number_is_left_alone(self):
+        # A file already on the new format should pass through unchanged.
+        profiles = [
+            {
+                "id": "mp3-320",
+                "name": "MP3 · 320 kbps",
+                "format": "mp3",
+                "bitrate": 320,
+                "download_path": "",
+            },
+            {
+                "id": "flac",
+                "name": "FLAC · lossless",
+                "format": "flac",
+                "bitrate": 1411,
+                "download_path": "",
+            },
+        ]
+        instance = self._load(
+            "healing-profile-bitrates-untouched",
+            {"download_profiles": profiles},
+        )
+
+        self.assertEqual(instance.get("download_profiles"), profiles)
+
 
 if __name__ == "__main__":
     unittest.main()

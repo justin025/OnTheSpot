@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 
@@ -144,6 +145,12 @@ class Config:
                 print(f"{e}, restoring the default value.")
                 self.__config[key] = copy.deepcopy(default)
 
+        # Beta 1 changed a download profile's bitrate from text ("320k") to a
+        # whole number; a file written by Alpha 2 still holds the old text.
+        # The check above only sees ``download_profiles`` as a whole list, so
+        # heal each profile's bitrate separately here.
+        self.__heal_download_profiles()
+
         # Version identifies the bundled application build, not a user setting.
         # Keep existing configuration volumes from pinning the UI to an older
         # release after the Docker image has been upgraded.
@@ -262,6 +269,35 @@ class Config:
             else:
                 print("Credentials Write failed, credentials are kept in config file.")
                 return
+
+    def __heal_download_profiles(self):
+        """Repair an Alpha 2 profile's text bitrate to the number Beta 1 expects.
+
+        Alpha 2 stored a profile's bitrate as text such as "320k". The Deezer
+        quality selection compares the bitrate with a number, so leftover text
+        raises instead of downloading. Numeric text, with or without the "k"
+        suffix, becomes the number; anything else falls back to 320, the same
+        default the ``/profiles`` endpoint uses for a missing bitrate.
+        """
+        profiles = self.__config.get("download_profiles")
+        if not isinstance(profiles, list):
+            return
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            bitrate = profile.get("bitrate")
+            if isinstance(bitrate, int) and not isinstance(bitrate, bool):
+                continue
+            if isinstance(bitrate, str):
+                match = re.fullmatch(r"\s*(\d+)[kK]?\s*", bitrate)
+                if match:
+                    profile["bitrate"] = int(match.group(1))
+                    continue
+            print(
+                f"Download profile '{profile.get('id')}' has an invalid "
+                f"bitrate {bitrate!r}, using the default of 320."
+            )
+            profile["bitrate"] = 320
 
     def get(self, key, default=None):
         """
