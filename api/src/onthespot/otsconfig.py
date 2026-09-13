@@ -119,6 +119,31 @@ class Config:
         self.__credential_values = self.__credentials.load()
         self.__adopt_plaintext_credentials()
 
+        # The settings endpoint stored whatever it received, so an existing or
+        # hand-edited configuration file can hold text or booleans where the
+        # template declares another type. Repair those values on load; the
+        # healed configuration reaches disk on the next normal save.
+        for key, value in list(self.__config.items()):
+            # Credentials belong to the encrypted store, not to this file.
+            if key in CREDENTIAL_KEYS or key not in self.__template_data:
+                continue
+            default = self.__template_data[key]
+            if isinstance(default, str) and isinstance(value, (bool, int)):
+                # The settings endpoint converted "true"/"false" to a boolean
+                # and a run of digits to a number, text settings included.
+                # Restore the user's text; the fallback below would throw the
+                # setting away.
+                if isinstance(value, bool):
+                    self.__config[key] = "true" if value else "false"
+                else:
+                    self.__config[key] = str(value)
+                continue
+            try:
+                self.__config[key] = self.coerce(key, value)
+            except ValueError as e:
+                print(f"{e}, restoring the default value.")
+                self.__config[key] = copy.deepcopy(default)
+
         # Version identifies the bundled application build, not a user setting.
         # Keep existing configuration volumes from pinning the UI to an older
         # release after the Docker image has been upgraded.
@@ -309,6 +334,71 @@ class Config:
                 snapshot[key] = ""
 
         return snapshot
+
+    def coerce(self, key, value):
+        """
+        Converts a value to the type the default template declares for the key.
+
+        The bundled ``otsconfig_default.json`` is the type authority: the type of
+        a key's default decides the type stored under that key. Only the text
+        forms a query string or an imported document produce are converted; any
+        other mismatch raises instead of hiding a programming error. Keys the
+        template does not hold pass through unchanged. A default that is neither
+        a bool, an int, a string nor a list raises, so a new template type cannot
+        slip past the type authority.
+
+        Healing on load calls this. ``set()``
+        deliberately does not; it stores what it is given.
+
+        :param key: The configuration key the value belongs to.
+        :param value: The value to convert.
+        :return: The value as the type of the key's default.
+        :raises ValueError: If the value does not suit the type of the key's default.
+        """
+        if key not in self.__template_data:
+            return value
+
+        expected = type(self.__template_data[key])
+
+        if expected is bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.casefold() in ("true", "false"):
+                return value.casefold() == "true"
+            raise ValueError(f"Configuration key '{key}' needs a true or false value")
+
+        if expected is int:
+            # A bool is an int in Python, so exclude it from the number path.
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                try:
+                    return int(value)
+                except ValueError:
+                    pass
+            raise ValueError(f"Configuration key '{key}' needs a whole number")
+
+        if expected is str:
+            if isinstance(value, str):
+                return value
+            raise ValueError(f"Configuration key '{key}' needs a text value")
+
+        if expected is list:
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    return parsed
+            raise ValueError(f"Configuration key '{key}' needs a list value")
+
+        raise ValueError(
+            f"Configuration key '{key}' has the unsupported default type "
+            f"'{expected.__name__}'"
+        )
 
     def set(self, key, value):
         """
