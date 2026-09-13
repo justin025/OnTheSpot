@@ -383,8 +383,8 @@ class Config:
         a bool, an int, a string nor a list raises, so a new template type cannot
         slip past the type authority.
 
-        Healing on load calls this. ``set()``
-        deliberately does not; it stores what it is given.
+        Healing on load calls this. ``set()`` deliberately does not; it stores
+        what it is given.
 
         :param key: The configuration key the value belongs to.
         :param value: The value to convert.

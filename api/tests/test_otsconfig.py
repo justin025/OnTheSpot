@@ -227,20 +227,18 @@ class ConfigHealingTests(unittest.TestCase):
             },
         )
 
+        # Only the bitrates change; every other field survives, in order.
         profiles = instance.get("download_profiles")
-        bitrates = [profile["bitrate"] for profile in profiles]
-        self.assertEqual(bitrates, [320, 1411, 320])
-        for bitrate in bitrates:
-            self.assertIsInstance(bitrate, int)
-            self.assertNotIsInstance(bitrate, bool)
-        # Everything else about each profile is untouched, in order.
-        self.assertEqual([p["id"] for p in profiles], ["mp3-320", "flac", "odd"])
-        self.assertEqual([p["format"] for p in profiles], ["mp3", "flac", "mp3"])
         self.assertEqual(
-            [p["name"] for p in profiles],
-            ["MP3 · 320 kbps", "FLAC · lossless", "Odd"],
+            profiles,
+            [
+                {**profile, "bitrate": bitrate}
+                for profile, bitrate in zip(stored_profiles, (320, 1411, 320))
+            ],
         )
-        self.assertEqual([p["download_path"] for p in profiles], ["", "", ""])
+        # Equality alone would accept 320.0.
+        for profile in profiles:
+            self.assertIsInstance(profile["bitrate"], int)
         self.assertEqual(instance.get("active_download_profile"), "flac")
 
     def test_profile_bitrate_that_is_already_a_number_is_left_alone(self):
