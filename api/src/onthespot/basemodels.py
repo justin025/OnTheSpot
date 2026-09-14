@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 # Pydantic schemas of body data
@@ -264,3 +266,7 @@ class AppSettings(BaseModel):
     v2a_enable: bool = False
     v2a_preferred_codec: str = "mp3"
     v2a_preferred_bitrate: int = 192
+
+    _ffmpeg_bin_path: str = ""
+    _cache_dir: str = ""
+    _log_file: str = ""
