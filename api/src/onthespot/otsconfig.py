@@ -2,11 +2,15 @@ import copy
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 
-from .credentials import CREDENTIAL_KEYS, CredentialStore
+from pydantic import TypeAdapter, ValidationError
+from pydantic_core import PydanticUndefined
 
+from .basemodels import AppSettings
+from .credentials import CREDENTIAL_KEYS, CredentialStore
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +75,8 @@ class Config:
         config_root = config_dir()
 
         self.__cfg_path = os.path.join(config_root, "otsconfig.json")
-        self.__default_cfg_path = os.path.join(
-            os.path.dirname(__file__), "otsconfig_default.json"
-        )
+        self.__default_cfg_path = os.path.join(os.path.dirname(__file__), "otsconfig_default.json")
+        self.__model_fields = AppSettings.model_fields
         self.session_uuid = str(uuid.uuid4())
 
         # Load default config
@@ -81,9 +84,7 @@ class Config:
             with open(self.__default_cfg_path, "r", encoding="utf-8") as df:
                 self.__template_data = json.load(df)
         except (json.JSONDecodeError, FileNotFoundError):
-            print(
-                f"Failed to load default config file: {self.__default_cfg_path}, using empty template"
-            )
+            print(f"Failed to load default config file: {self.__default_cfg_path}, using empty template")
             self.__template_data = {}
 
         # Load or create user config
@@ -92,9 +93,7 @@ class Config:
                 with open(self.__cfg_path, "r", encoding="utf-8") as cf:
                     self.__config = json.load(cf)
             except (json.JSONDecodeError, FileNotFoundError):
-                print(
-                    f"Failed to load user config file: {self.__cfg_path}, using default template"
-                )
+                print(f"Failed to load user config file: {self.__cfg_path}, using default template")
                 self.__config = self.__template_data.copy()
         else:
             try:
@@ -104,9 +103,7 @@ class Config:
                 self.__config = self.__template_data.copy()
             except (FileNotFoundError, PermissionError) as e:
                 print(f"Failed to create config dir: {e}, attempting fallback path.")
-                fallback_path = os.path.abspath(
-                    os.path.join(os.path.expanduser("~"), ".config", "otsconfig.json")
-                )
+                fallback_path = os.path.abspath(os.path.join(os.path.expanduser("~"), ".config", "otsconfig.json"))
                 self.__cfg_path = fallback_path
                 os.makedirs(os.path.dirname(self.__cfg_path), exist_ok=True)
                 with open(self.__cfg_path, "w", encoding="utf-8") as cf:
@@ -119,92 +116,101 @@ class Config:
         self.__credential_values = self.__credentials.load()
         self.__adopt_plaintext_credentials()
 
-        # Version identifies the bundled application build, not a user setting.
-        # Keep existing configuration volumes from pinning the UI to an older
+        # Config validation
+        validated_config = {}
+
+        for key, value in list(self.__config.items()):
+            validated_value = self.validate_value(value, key)
+            if validated_value is not None:
+                validated_config[key] = validated_value
+            else:
+                continue
+
+        self.__config = validated_config
+
+        # Keep existing configuration from pinning the UI to an older
         # release after the Docker image has been upgraded.
         if self.__template_data.get("version"):
             self.__config["version"] = self.__template_data["version"]
 
-        # ``cache_metadata_in_queue`` was the original UI key for the global
-        # API-cache switch.  Preserve an existing user's choice while moving
-        # to the accurately named setting.
-        # if "cache_api_calls" not in self.__config:
-        #    self.__config["cache_api_calls"] = bool(
-        #        self.__config.get(
-        #            "cache_metadata_in_queue",
-        #            self.__template_data.get("cache_api_calls", True),
-        #        )
-        #    )
-
-        # The bundled defaults are written for the Linux/Docker image. When
-        # running the API directly on Windows, translate those container paths
-        # to the user's normal Music/Videos folders instead of creating a
-        # literal ``C:\\root`` directory.
-        # if os.name == "nt":
-        #     for path_key in ("audio_download_path", "video_download_path"):
-        #         configured_path = self.__config.get(path_key)
-        #         normalized_path = str(configured_path or "").replace("\\", "/")
-        #         if normalized_path.startswith("/root/"):
-        #             self.__config[path_key] = os.path.join(
-        #                 os.path.expanduser("~"), normalized_path.removeprefix("/root/")
-        #             )
-
-        # Make Download Dirs
+        # Download Folders Setup
         try:
             os.makedirs(self.get("audio_download_path"), exist_ok=True)
             os.makedirs(self.get("video_download_path"), exist_ok=True)
         except (FileNotFoundError, PermissionError) as e:
             print(f"Failed to create download dir: {e}, attempting fallback path.")
-            self.set(
-                "audio_download_path", self.__template_data.get("audio_download_path")
-            )
-            self.set(
-                "video_download_path", self.__template_data.get("video_download_path")
-            )
+            self.set("audio_download_path", self.__template_data.get("audio_download_path"))
+            self.set("video_download_path", self.__template_data.get("video_download_path"))
             os.makedirs(self.get("audio_download_path"), exist_ok=True)
             os.makedirs(self.get("video_download_path"), exist_ok=True)
 
-        # Set FFMPEG Path
-        ffmpeg_path = os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg")
-        if not ffmpeg_path and os.name != "nt":
-            ffmpeg_path = "/usr/bin/ffmpeg"
+        # FFMPEG Path Setup
+        ffmpeg_env_path = os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg")
+        ffmpeg_path = "/usr/bin/ffmpeg" if not ffmpeg_env_path and os.name != "nt" else ffmpeg_env_path
 
         if ffmpeg_path and os.path.isfile(ffmpeg_path):
             self._ffmpeg_bin_path = ffmpeg_path
+            self.set("_ffmpeg_bin_path", self._ffmpeg_bin_path)
+            print(f"FFMPEG Binary: {self._ffmpeg_bin_path}")
         else:
-            print(
-                "Failed to find ffmpeg binary, please consider installing ffmpeg or defining its path."
-            )
+            print("Failed to find ffmpeg binary, please consider installing ffmpeg or defining its path.")
             self._ffmpeg_bin_path = ""
 
-        print(f"FFMPEG Binary: {self._ffmpeg_bin_path}")
-        self.set("_ffmpeg_bin_path", self._ffmpeg_bin_path)
-        self.set(
-            "_log_file",
-            os.path.join(
+        # Cache Folder Setup
+        try:
+            os.makedirs(cache_dir(), exist_ok=True)
+            self.set("_cache_dir", cache_dir())
+        except (FileNotFoundError, PermissionError):
+            fallback_cachedir = os.path.abspath(".cache")
+            os.makedirs(fallback_cachedir, exist_ok=True)
+            self.set("_cache_dir", fallback_cachedir)
+            print(f'Cache dir cannot be set up at "{self.get("_cache_dir")}"; Falling back to: {fallback_cachedir}')
+
+        # Logs Folder Setup
+        try:
+            logs_dir = os.path.join(
                 config_root,
                 "logs",
                 self.session_uuid,
                 "onthespot.log",
-            ),
-        )
-        self.set(
-            "_cache_dir",
-            cache_dir(),
-        )
-        try:
-            os.makedirs(os.path.dirname(self.get("_log_file")), exist_ok=True)
-            os.makedirs(self.get("_cache_dir"), exist_ok=True)
+            )
+            os.makedirs(os.path.dirname(logs_dir), exist_ok=True)
+            self.set("_log_file", logs_dir)
         except (FileNotFoundError, PermissionError):
-            fallback_logdir = os.path.abspath(
-                os.path.join(".logs", self.session_uuid, "onthespot.log")
-            )
-            print(
-                f'Current logging dir cannot be set up at "{self.get("video_download_path")}"'
-                f"; Falling back to: {fallback_logdir}"
-            )
+            fallback_logdir = os.path.abspath(os.path.join(".logs", self.session_uuid, "onthespot.log"))
             self.set("_log_file", fallback_logdir)
             os.makedirs(os.path.dirname(self.get("_log_file")), exist_ok=True)
+            print(f'Log dir cannot be set up at "{self.get("_log_file")}"; Falling back to: {fallback_logdir}')
+
+    def validate_value(self, value, key):
+        if key.startswith("_"):
+            return None
+        if key not in self.__model_fields:
+            print(f"key: {key} not present in model config, skipping...")
+            return None
+
+        field_info = self.__model_fields[key]
+        adapter = TypeAdapter(field_info.annotation)
+        try:
+            validated_value = adapter.validate_python(value)
+            if isinstance(validated_value, list):
+                validated_value = [
+                    item.model_dump() if hasattr(item, "model_dump") else item for item in validated_value
+                ]
+            elif hasattr(validated_value, "model_dump"):
+                validated_value = validated_value.model_dump()
+        except ValidationError:
+            if field_info.default is not PydanticUndefined:
+                print(f"can't validate key: {key}, loading default value...")
+                validated_value = field_info.default
+            elif field_info.default_factory is not None:
+                print(f"can't validate key: {key}, loading default value...")
+                validated_value = field_info.default_factory()
+            else:
+                print(f"can't validate key or no default provided for: {key}, skipping...")
+                return None
+
+        return validated_value
 
     def __adopt_plaintext_credentials(self):
         """Move any plaintext credentials out of the config file.
@@ -214,11 +220,7 @@ class Config:
         they are carried across once rather than discarded. Only the credential
         keys move; nothing else from an old config is imported.
         """
-        found = {
-            key: self.__config.get(key)
-            for key in list(self.__config)
-            if key in CREDENTIAL_KEYS
-        }
+        found = {key: self.__config.get(key) for key in list(self.__config) if key in CREDENTIAL_KEYS}
         if not found:
             return
 
@@ -274,11 +276,7 @@ class Config:
         snapshot.update(copy.deepcopy(self.__credential_values))
 
         if not include_runtime:
-            snapshot = {
-                key: value
-                for key, value in snapshot.items()
-                if not str(key).startswith("_")
-            }
+            snapshot = {key: value for key, value in snapshot.items() if not str(key).startswith("_")}
 
         if include_secrets:
             return snapshot
@@ -296,39 +294,27 @@ class Config:
             )
         snapshot["accounts"] = accounts
 
-        secret_keys = {
-            "spotify_webapi_override_client_secret",
-            "playlist_automation_client_secret",
-            "webui_password",
-        }
-        for key in list(snapshot):
-            if key in secret_keys or any(
-                marker in key.casefold() for marker in ("password", "secret", "token")
-            ):
-                snapshot[f"{key}_configured"] = bool(snapshot.get(key))
-                snapshot[key] = ""
-
         return snapshot
 
     def set(self, key, value):
         """
         Sets a configuration key to a given value.
+        Performs validation against base model
 
         :param key: The configuration key to set.
         :param value: The value to associate with the key.
         :return: The value that was set.
         """
         if key in CREDENTIAL_KEYS:
-            self.__credential_values[key] = (
-                value.copy() if isinstance(value, (list, dict)) else value
-            )
+            self.__credential_values[key] = value.copy() if isinstance(value, (list, dict)) else value
             self.__credentials.save(self.__credential_values)
             return value
-        if type(value) in [list, dict]:
-            self.__config[key] = value.copy()
-        else:
+        if key.startswith("_"):
             self.__config[key] = value
-        return value
+        elif self.validate_value(value, key) is not None:
+            self.__config[key] = self.validate_value(value, key)
+        else:
+            print(f"Can't set {key}:{value}, validation against model failed.")
 
     def save(self):
         """
@@ -338,13 +324,6 @@ class Config:
         If any step fails, appropriate fallback mechanisms are used to ensure that the application can still run.
         """
         os.makedirs(os.path.dirname(self.__cfg_path), exist_ok=True)
-        # Merge template data into config for missing keys
-        for key in list(set(self.__template_data).difference(set(self.__config))):
-            # Credential keys are deliberately absent from __config. Merging the
-            # template default back in would route through set() and overwrite
-            # the stored credentials with an empty list.
-            if not key.startswith("_") and key not in CREDENTIAL_KEYS:
-                self.set(key, self.__template_data[key])
         # Never let a credential reach the plaintext config file.
         for key in CREDENTIAL_KEYS:
             self.__config.pop(key, None)

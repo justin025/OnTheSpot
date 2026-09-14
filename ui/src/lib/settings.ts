@@ -179,4 +179,7 @@ export interface AppSettings {
   v2a_enable?: boolean;
   v2a_preferred_codec?: string;
   v2a_preferred_bitrate?: number;
+  _ffmpeg_bin_path?: string;
+  _cache_dir?: string;
+  _log_file?: string;
 }
