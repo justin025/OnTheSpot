@@ -14,17 +14,16 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, HTTPException, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
-    Response,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import TypeAdapter
 from pydantic_core import ValidationError
 
 # librespot currently ships protobuf files generated for the compatibility
@@ -50,7 +49,8 @@ from .api.spotify import (
 )
 from .api.tidal import tidal_add_account_pt1, tidal_add_account_pt2
 from .api.youtube_music import youtube_music_add_account
-from .constants import ItemStatus
+from .basemodels import *
+from .constants import _SEARCH_FILTER_TYPES, _SEARCH_SERVICE_FILTER_KEYS, ItemStatus
 from .downloader import DownloadWorker, RetryWorker
 from .export_locations import (
     default_export_directory,
@@ -62,16 +62,7 @@ from .export_locations import (
 from .library import (
     export_index,
     import_index,
-    is_allowed_path,
-    missing_items,
-    read_cover,
-    remove_missing_items,
-    rename_file,
-    scan_library,
-    update_cover,
-    update_metadata,
     verify_file,
-    write_m3u,
 )
 from .otsconfig import config
 from .parse_item import get_search_results
@@ -92,11 +83,11 @@ from .runtimedata import (
     subscribe_websocket,
     unsubscribe_websocket,
 )
-from .statistics import clear_history, export_history, get_statistics, import_history
+from .statistics import clear_history, export_history, import_history
 from .updater import (
     check_for_updates,
 )
-from .utils import format_local_id, open_item, retry_single_item
+from .utils import open_item, retry_single_item
 from .youtube_auth import (
     managed_youtube_cookie_path,
     store_youtube_cookie_file,
@@ -121,6 +112,7 @@ fillaccountpool = FillAccountPool()
 _spotify_companion_pairings: dict[str, float] = {}
 _spotify_companion_pairing_lock = threading.Lock()
 _SPOTIFY_COMPANION_PAIRING_TTL = 10 * 60
+
 
 ##ONTHESPOT BRIDGE FUNCTIONS
 def add_spotify_account():
@@ -162,12 +154,8 @@ def add_tidal_account():
         verification_url,
         verification_url,
     )
-    notification_hook(
-        title="Continue Login - Go to the URL", url=f"https://{verification_url}"
-    )
-    login_worker = threading.Thread(
-        target=add_tidal_account_worker, args=(device_code,)
-    )
+    notification_hook(title="Continue Login - Go to the URL", url=f"https://{verification_url}")
+    login_worker = threading.Thread(target=add_tidal_account_worker, args=(device_code,))
     login_worker.daemon = True
     login_worker.start()
 
@@ -198,33 +186,6 @@ def search(search_term, search_filters: dict | None = None) -> None:
     return results
 
 
-_SEARCH_FILTER_TYPES = {
-    "tracks": ("track",),
-    "albums": ("album",),
-    "playlists": ("playlist",),
-    "artists": ("artist",),
-    "podcasts": ("show", "episode"),
-    "movies": ("movie", "show", "episode"),
-}
-
-# Search categories are user-facing concepts, while each provider accepts a
-# different set of API types.  Keep the mapping provider-specific so enabling
-# Movies cannot send Spotify an unsupported ``movie`` type (which causes the
-# whole Spotify search request to fail), and so audio providers are not asked
-# for Crunchyroll video results.
-_SEARCH_SERVICE_FILTER_KEYS = {
-    "apple_music": {"tracks", "albums", "playlists", "artists"},
-    "bandcamp": {"tracks", "albums", "artists"},
-    "crunchyroll": {"movies"},
-    "deezer": {"tracks", "albums", "playlists", "artists"},
-    "qobuz": {"tracks", "albums", "playlists", "artists"},
-    "soundcloud": {"tracks", "albums", "playlists", "artists"},
-    "spotify": {"tracks", "albums", "playlists", "artists", "podcasts"},
-    "tidal": {"tracks", "albums", "playlists", "artists"},
-    "youtube_music": {"tracks"},
-}
-
-
 def search_service_catalogs(
     search_term: str,
     search_filters: dict[str, Any] | None = None,
@@ -244,19 +205,13 @@ def search_service_catalogs(
     if selected_services is None and isinstance(filters.get("services"), list):
         selected_services = [str(value) for value in filters["services"]]
     allowed_services = (
-        {
-            service
-            for service in selected_services
-            if service in SERVICE_SEARCH_FUNCTIONS
-        }
+        {service for service in selected_services if service in SERVICE_SEARCH_FUNCTIONS}
         if selected_services is not None
         else None
     )
     if allowed_services == set():
         return []
-    selected_filter_keys = {
-        key for key in _SEARCH_FILTER_TYPES if filters.get(key, True)
-    }
+    selected_filter_keys = {key for key in _SEARCH_FILTER_TYPES if filters.get(key, True)}
     if not selected_filter_keys:
         return []
 
@@ -313,9 +268,7 @@ def search_service_catalogs(
     if not jobs:
         return []
     worker_count = min(4, len(jobs))
-    with ThreadPoolExecutor(
-        max_workers=worker_count, thread_name_prefix="ots-search"
-    ) as executor:
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="ots-search") as executor:
         provider_results = list(executor.map(run_provider, jobs))
 
     # Keep each provider's own relevance ordering, but interleave provider
@@ -345,14 +298,10 @@ def search_service_catalogs(
                     "item_id": item_id,
                     "item_service": str(item.get("item_service") or service),
                     "item_type": item_type,
-                    "name": str(
-                        item.get("item_name") or item.get("name") or "Untitled"
-                    ),
+                    "name": str(item.get("item_name") or item.get("name") or "Untitled"),
                     "artist": str(item.get("item_by") or item.get("artist") or ""),
                     "album": str(item.get("item_album") or item.get("album") or ""),
-                    "thumbnail": str(
-                        item.get("item_thumbnail_url") or item.get("thumbnail") or ""
-                    ),
+                    "thumbnail": str(item.get("item_thumbnail_url") or item.get("thumbnail") or ""),
                     "url": item_url,
                     "item_url": item_url,
                 }
@@ -387,8 +336,6 @@ def relogin():
 # ---------------------------------------------------------------------------
 # FASTAPI INIT
 # ---------------------------------------------------------------------------
-
-
 # START ONTHESPOT WORKERS HERE
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -429,9 +376,7 @@ app = FastAPI(
 # cross-origin frontends with a comma-separated ONTHESPOT_CORS_ORIGINS value.
 cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
 cors_origins.extend(
-    origin.strip()
-    for origin in os.environ.get("ONTHESPOT_CORS_ORIGINS", "").split(",")
-    if origin.strip()
+    origin.strip() for origin in os.environ.get("ONTHESPOT_CORS_ORIGINS", "").split(",") if origin.strip()
 )
 cors_origins = list(dict.fromkeys(cors_origins))
 
@@ -451,273 +396,7 @@ app.add_middleware(
 # app.frontend("/", directory="dist")
 
 
-# Pydantic schemas of body data
-class AccountData(BaseModel):
-    username: str | None = None
-    token: str | None = None
-
-
-class SpotifyCompanionLogin(BaseModel):
-    pairing_token: str
-    login: dict[str, Any]
-
-
-class YouTubeAuthentication(BaseModel):
-    mode: str = "none"
-    browser: str | None = None
-    cookie_file: str | None = None
-
-## Queue Models
-class QueueOrder(BaseModel):
-    local_ids: list[str]
-
-
-class QueueBatch(BaseModel):
-    local_ids: list[str]
-    action: str
-    priority: int | None = None
-    profile_id: str | None = None
-
-
-class QueueVerify(BaseModel):
-    local_ids: list[str] = []
-    retry: bool = True
-
-## Profiles Models
-class DownloadProfile(BaseModel):
-    id: str
-    name: str
-    format: str = "mp3"
-    bitrate: int = 320
-    download_path: str = ""
-
-class ActiveProfile(BaseModel):
-    profile_id: str
-
-## Library Models
-class LibraryPath(BaseModel):
-    path: str
-
-
-class LibraryPaths(BaseModel):
-    paths: list[str] = []
-
-
-class LibraryVerify(BaseModel):
-    paths: list[str] = []
-
-
-class LibraryRename(BaseModel):
-    path: str
-    new_name: str
-
-
-class LibraryMetadata(BaseModel):
-    path: str
-    title: str | None = None
-    artist: str | None = None
-    album: str | None = None
-    album_artist: str | None = None
-    genre: str | None = None
-    year: str | int | None = None
-    release_date: str | None = None
-    track_number: str | int | None = None
-    disc_number: str | int | None = None
-    lyrics: str | None = None
-
-
-class LibraryM3U(BaseModel):
-    name: str
-    paths: list[str]
-
-
-class LibraryOpen(BaseModel):
-    path: str
-    action: str = "folder"
-
-
-## Config Models
-
-class AccountLogin(BaseModel):
-    client_id: str | None = None
-    app_version: str | None = None
-    app_locale: str | None = None
-
-
-class Account(BaseModel):
-    uuid: str
-    service: str
-    active: bool = True
-    login: AccountLogin | None = None
-
-
-
-class AppSettings(BaseModel):
-    version: str = "v2.0.0 Alpha 2"
-    debug_mode: bool = False
-    language_index: int = 0
-    total_downloaded_items: int = 0
-    total_downloaded_data: int = 0
-    m3u_format: str = "m3u8"
-    use_double_digit_path_numbers: bool = False
-    ffmpeg_args: list[str] = Field(default_factory=list)
-    active_account_number: int = 0
-    accounts: list[Account] = Field(default_factory=list)
-
-    language: str = "en_US"
-    theme: str = "dark"
-    active_download_profile: str = "mp3-320"
-    export_folder_path: str = ""
-    playlist_backup_folder_path: str = ""
-    youtube_auth_mode: str = "none"
-    youtube_cookies_browser: str = ""
-    youtube_cookies_file: str = ""
-    download_profiles: list[DownloadProfile] = Field(default_factory=list)
-    explicit_label: str = "🅴"
-    download_copy_btn: bool = False
-    download_open_btn: bool = False
-    download_locate_btn: bool = True
-    download_delete_btn: bool = True
-    show_search_thumbnails: bool = False
-    show_download_thumbnails: bool = True
-    thumbnail_size: int = 60
-    max_search_results: int = 10
-    disable_download_popups: bool = False
-    windows_10_explorer_thumbnails: bool = False
-    mirror_spotify_playback: bool = False
-
-    check_for_updates: bool = True
-    update_repository: str = "ots-downloader/onthespot"
-    update_check_interval_hours: int = 12
-    illegal_character_replacement: str = "-"
-    raw_media_download: bool = False
-    rotate_active_account_number: bool = False
-    download_delay: int = 10
-    download_delay_variance: int = 5
-    download_chunk_size: int = 50000
-    maximum_queue_workers: int = 1
-    maximum_download_workers: int = 1
-    enable_retry_worker: bool = False
-    retry_worker_delay: int = 5
-    api_retry_max_attempts: int = 3
-    api_retry_base_delay: int = 2
-    api_retry_max_delay: int = 60
-    api_request_delay: int = 1
-    cache_api_calls: bool = True
-    api_response_cache_ttl_seconds: int = 86400
-    spotify_metadata_cache_ttl_seconds: int = 604800
-    spotify_search_cache_ttl_seconds: int = 900
-    playlist_automation_cache_ttl_seconds: int = 60
-    spotify_connect_port: int = 6768
-    spotify_webapi_override_client_id: str = ""
-    spotify_webapi_override_client_secret: str = ""
-    cache_metadata_in_queue: bool = True
-    fetch_genre_metadata: bool = False
-    fetch_extended_album_metadata: bool = False
-    fetch_audio_features: bool = False
-    fetch_track_credits: bool = False
-    enable_search_tracks: bool = True
-    enable_search_albums: bool = True
-    enable_search_playlists: bool = True
-    enable_search_artists: bool = True
-    enable_search_episodes: bool = True
-    enable_search_podcasts: bool = True
-    enable_search_audiobooks: bool = True
-    f_search_tracks: bool = False
-    f_search_albums: bool = False
-    f_search_artists: bool = False
-    f_search_playlists: bool = False
-    search_prefix: str = "the"
-    download_queue_show_waiting: bool = True
-    download_queue_show_failed: bool = True
-    download_queue_show_cancelled: bool = True
-    download_queue_show_unavailable: bool = True
-    download_queue_show_completed: bool = True
-    audio_download_path: str = "/root/Music/OnTheSpot"
-    track_path_formatter: str = "Tracks/{album_artist}/{year} {album}/{track_number}. {name}"
-    podcast_file_format: str = "mp3"
-    podcast_path_formatter: str = "Episodes/{album}/{name}"
-    use_playlist_path: bool = False
-    playlist_path_formatter: str = "Playlists/{playlist_name} by {playlist_owner}/{playlist_number}. {name} - {artist}"
-    create_m3u_file: bool = False
-    m3u_path_formatter: str = "M3U/{playlist_name} by {playlist_owner}"
-    extinf_separator: str = "; "
-    extinf_label: str = "{playlist_number}. {artist} - {name}"
-    save_album_cover: bool = False
-    album_cover_format: str = "png"
-    file_hertz: int = 44100
-    use_custom_file_bitrate: bool = False
-    use_source_format: bool = False
-    prefer_best_source_format: bool = True
-    download_lyrics: bool = False
-    only_download_synced_lyrics: bool = False
-    only_download_plain_lyrics: bool = False
-    save_lrc_file: bool = False
-    translate_file_path: bool = False
-    metadata_separator: str = "; "
-    overwrite_existing_metadata: bool = False
-    embed_branding: bool = False
-    embed_cover: bool = True
-    embed_artist: bool = True
-    embed_album: bool = True
-    embed_albumartist: bool = True
-    embed_name: bool = True
-    embed_year: bool = True
-    embed_discnumber: bool = True
-    embed_tracknumber: bool = True
-    embed_genre: bool = True
-    embed_performers: bool = False
-    embed_producers: bool = False
-    embed_writers: bool = True
-    embed_composer: bool = True
-    prefer_composer_as_album_artist: bool = False
-    shorten_composer_tag: bool = False
-    embed_label: bool = True
-    embed_copyright: bool = True
-    embed_description: bool = True
-    embed_language: bool = True
-    embed_isrc: bool = True
-    embed_length: bool = True
-    embed_url: bool = True
-    embed_key: bool = False
-    embed_bpm: bool = False
-    embed_compilation: bool = False
-    embed_lyrics: bool = False
-    embed_explicit: bool = False
-    embed_upc: bool = False
-    embed_service_id: bool = False
-    embed_timesignature: bool = False
-    embed_acousticness: bool = False
-    embed_danceability: bool = False
-    embed_energy: bool = False
-    embed_instrumentalness: bool = False
-    embed_liveness: bool = False
-    embed_loudness: bool = False
-    embed_speechiness: bool = False
-    embed_valence: bool = False
-    video_download_path: str = "/root/Videos/OnTheSpot"
-    movie_file_format: str = "mkv"
-    movie_path_formatter: str = "Movies/{name} ({release_year})"
-    show_file_format: str = "mkv"
-    show_path_formatter: str = "Shows/{show_name}/Season {season_number}/{episode_number}. {name}"
-    preferred_video_resolution: int = 1080
-    download_subtitles: bool = False
-    download_chapters: bool = False
-    preferred_audio_language: str = "en-US"
-    preferred_subtitle_language: str = "en-US"
-    download_all_available_audio: bool = False
-    download_all_available_subtitles: bool = False
-    v2a_enable: bool = False
-    v2a_preferred_codec: str = "mp3"
-    v2a_preferred_bitrate: int = 192
-# ---------------------------------------------------------------------------
-# API ENDPOINTS
-# ---------------------------------------------------------------------------
-
-
-##QUERY ENDPOINTS
-
-
+##PROFILES ENDPOINTS
 @app.get("/profiles")
 async def get_download_profiles():
     return {
@@ -738,9 +417,7 @@ async def save_download_profile(profile: DownloadProfile):
     if value["format"] not in {"mp3", "flac", "m4a", "opus", "ogg", "wav"}:
         return {"success": False, "error": "Unsupported audio format"}
     value["bitrate"] = int(profile.bitrate or 320)
-    value["download_path"] = (
-        os.path.abspath(profile.download_path) if profile.download_path else ""
-    )
+    value["download_path"] = os.path.abspath(profile.download_path) if profile.download_path else ""
     profiles = [entry for entry in profiles if entry.get("id") != clean_id]
     profiles.append(value)
     config.set("download_profiles", profiles)
@@ -762,11 +439,7 @@ async def set_active_download_profile(profile: ActiveProfile):
 
 @app.delete("/profiles/{profile_id}")
 async def delete_download_profile(profile_id: str):
-    profiles = [
-        entry
-        for entry in (config.get("download_profiles", []) or [])
-        if entry.get("id") != profile_id
-    ]
+    profiles = [entry for entry in (config.get("download_profiles", []) or []) if entry.get("id") != profile_id]
     if not profiles:
         return {"success": False, "error": "At least one profile is required"}
     config.set("download_profiles", profiles)
@@ -776,8 +449,7 @@ async def delete_download_profile(profile_id: str):
     return {"success": True}
 
 
-##TODO: Implement Library module
-
+##SEARCH ENDPOINT
 @app.post("/query/url")
 async def query_url(q: str | None = None, filters: dict | None = None):
     """
@@ -805,9 +477,7 @@ async def search_spotify_catalog(q: str, types: str = "track"):
     """Search the Spotify public catalogue for the browse view."""
     raise NotImplementedError
     content_types = [
-        value
-        for value in types.split(",")
-        if value in {"track", "album", "artist", "playlist", "show", "episode"}
+        value for value in types.split(",") if value in {"track", "album", "artist", "playlist", "show", "episode"}
     ]
     if not content_types:
         content_types = ["track"]
@@ -917,9 +587,7 @@ async def query_download_state():
         return {
             "paused": download_paused.is_set(),
             "active": len(active),
-            "speed": sum(
-                float(item.get("download_speed_bps", 0) or 0) for item in active
-            ),
+            "speed": sum(float(item.get("download_speed_bps", 0) or 0) for item in active),
             "eta_seconds": max(
                 [item.get("eta_seconds") or 0 for item in active],
                 default=0,
@@ -938,13 +606,9 @@ async def reorder_download_queue(order: QueueOrder):
 
     pending_items = pending.get_items()
     pending_by_id = {str(item.get("local_id")): item for item in pending_items}
-    ordered_pending = [
-        pending_by_id[local_id] for local_id in requested if local_id in pending_by_id
-    ]
+    ordered_pending = [pending_by_id[local_id] for local_id in requested if local_id in pending_by_id]
     ordered_ids = {str(item.get("local_id")) for item in ordered_pending}
-    ordered_pending.extend(
-        item for item in pending_items if str(item.get("local_id")) not in ordered_ids
-    )
+    ordered_pending.extend(item for item in pending_items if str(item.get("local_id")) not in ordered_ids)
     pending.replace_items(ordered_pending)
     return {"success": True, "order": requested}
 
@@ -959,8 +623,7 @@ async def batch_download_queue_action(batch: QueueBatch):
     if action == "profile" and not batch.profile_id:
         raise HTTPException(status_code=400, detail="A profile is required")
     if action == "profile" and not any(
-        entry.get("id") == batch.profile_id
-        for entry in (config.get("download_profiles", []) or [])
+        entry.get("id") == batch.profile_id for entry in (config.get("download_profiles", []) or [])
     ):
         raise HTTPException(status_code=400, detail="Unknown download profile")
 
@@ -1013,11 +676,7 @@ async def batch_download_queue_action(batch: QueueBatch):
 
         if action == "priority":
             waiting = sorted(
-                (
-                    item
-                    for item in download_queue.values()
-                    if item.get("item_status") == ItemStatus.WAITING
-                ),
+                (item for item in download_queue.values() if item.get("item_status") == ItemStatus.WAITING),
                 key=lambda item: (
                     -int(item.get("priority", 0) or 0),
                     int(item.get("queue_position", 10**9) or 10**9),
@@ -1030,14 +689,10 @@ async def batch_download_queue_action(batch: QueueBatch):
         retry_single_item(item)
     for item in selected:
         if action in {"pause", "resume", "cancel"}:
-            progress_hook(
-                item, int(item.get("progress", 0) or 0), item.get("item_status")
-            )
+            progress_hook(item, int(item.get("progress", 0) or 0), item.get("item_status"))
 
     if action == "resume" and selected:
-        notification_hook(
-            "Downloads resumed", f"Resumed {len(selected)} selected item(s)."
-        )
+        notification_hook("Downloads resumed", f"Resumed {len(selected)} selected item(s).")
     return {"success": True, "changed": changed, "action": action}
 
 
@@ -1048,8 +703,7 @@ async def verify_download_queue(request: QueueVerify):
         candidates = [
             item
             for item in download_queue.values()
-            if item.get("item_status")
-            in (ItemStatus.DOWNLOADED, ItemStatus.ALREADY_EXISTS)
+            if item.get("item_status") in (ItemStatus.DOWNLOADED, ItemStatus.ALREADY_EXISTS)
             and (not request.local_ids or item.get("local_id") in request.local_ids)
         ]
 
@@ -1063,9 +717,7 @@ async def verify_download_queue(request: QueueVerify):
         if not result.get("valid"):
             item["item_status"] = ItemStatus.FAILED
             item["progress"] = 0
-            item["error"] = (
-                f"Verification failed: {result.get('reason', 'invalid file')}"
-            )
+            item["error"] = f"Verification failed: {result.get('reason', 'invalid file')}"
             item["_stats_recorded"] = False
             corrupt.append(item)
 
@@ -1077,10 +729,7 @@ async def verify_download_queue(request: QueueVerify):
         "healthy": len(candidates) - len(corrupt),
         "corrupt": len(corrupt),
         "retried": len(corrupt) if request.retry else 0,
-        "items": [
-            {"local_id": item.get("local_id"), "error": item.get("error", "")}
-            for item in corrupt
-        ],
+        "items": [{"local_id": item.get("local_id"), "error": item.get("error", "")} for item in corrupt],
     }
 
 
@@ -1192,9 +841,7 @@ async def queue_action(lid: str, action: str):
                         return {"success": False, "error": "Unknown queue action."}
                 break
     if changed_item is not None:
-        raw_progress = changed_item.get(
-            "progress", changed_item.get("item_progress", 0)
-        )
+        raw_progress = changed_item.get("progress", changed_item.get("item_progress", 0))
         try:
             current_progress = int(float(raw_progress or 0))
         except (TypeError, ValueError):
@@ -1302,6 +949,7 @@ async def get_config():
     """
     return config.as_dict()
 
+
 @app.patch("/config/set", status_code=status.HTTP_200_OK)
 async def update_partial_config(patch_data: dict):
     model_fields = AppSettings.model_fields
@@ -1332,32 +980,6 @@ async def update_partial_config(patch_data: dict):
         result = config.set(key, validated_value)
 
     return result
-        
-##@app.post("/config/set")
-##async def set_config(nkey, nvalue):
-##    """
-##    Endpoint to set a configuration setting.
-##
-##    :param nkey: Key of the configuration setting.
-##    :param nvalue: Value for the configuration setting.
-##    :return: Updated configuration setting.
-##    """
-##    if nvalue in ["false", "true"]:
-##        match nvalue:
-##            case "false":
-##                nvalue = False
-##            case "true":
-##                nvalue = True
-##            case _:
-##                pass
-##    try:
-##        if str(nvalue).isdigit():
-##            nvalue = int(nvalue)
-##    except:
-##        pass
-##    result = config.set(nkey, nvalue)
-##
-##    return result
 
 
 @app.post("/config/save")
@@ -1378,11 +1000,7 @@ async def get_export_location():
 @app.post("/exports/location")
 async def update_export_location(payload: dict[str, Any]):
     try:
-        return {
-            "directory": set_default_export_directory(
-                str(payload.get("directory") or "")
-            )
-        }
+        return {"directory": set_default_export_directory(str(payload.get("directory") or ""))}
     except OSError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1395,11 +1013,7 @@ async def get_playlist_backup_location():
 @app.post("/exports/playlist-backup-location")
 async def update_playlist_backup_location(payload: dict[str, Any]):
     try:
-        return {
-            "directory": set_playlist_backup_directory(
-                str(payload.get("directory") or "")
-            )
-        }
+        return {"directory": set_playlist_backup_directory(str(payload.get("directory") or ""))}
     except OSError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1409,10 +1023,7 @@ async def write_text_export(payload: dict[str, Any]):
     raise NotImplementedError
 
     filename = (
-        re.sub(
-            r"[^A-Za-z0-9._-]+", "-", str(payload.get("filename") or "export.txt")
-        ).strip(".-")
-        or "export.txt"
+        re.sub(r"[^A-Za-z0-9._-]+", "-", str(payload.get("filename") or "export.txt")).strip(".-") or "export.txt"
     )
     stem, extension = os.path.splitext(filename)
     try:
@@ -1430,11 +1041,7 @@ async def write_text_export(payload: dict[str, Any]):
 @app.post("/exports/open-folder")
 async def open_export_folder(payload: dict[str, Any]):
     try:
-        directory = (
-            playlist_backup_directory()
-            if payload.get("playlist_backups")
-            else default_export_directory()
-        )
+        directory = playlist_backup_directory() if payload.get("playlist_backups") else default_export_directory()
         os.makedirs(directory, exist_ok=True)
         open_item(directory)
         return {"success": True, "path": directory}
@@ -1485,9 +1092,7 @@ async def import_config(payload: dict):
     raise NotImplementedError
     ## Guard the imported entry using the AppSettings interface
     if not isinstance(payload, dict):
-        raise HTTPException(
-            status_code=400, detail="Configuration must be a JSON object"
-        )
+        raise HTTPException(status_code=400, detail="Configuration must be a JSON object")
     protected = {"_ffmpeg_bin_path", "_log_file", "_cache_dir"}
     for key, value in payload.items():
         if key in protected or key.startswith("_"):
@@ -1514,8 +1119,7 @@ def _safe_queue_snapshot() -> list[dict]:
             safe = {
                 key: value
                 for key, value in item.items()
-                if not key.startswith("_")
-                and key not in {"token", "credentials", "login"}
+                if not key.startswith("_") and key not in {"token", "credentials", "login"}
             }
             snapshot.append(safe)
         return snapshot
@@ -1524,7 +1128,6 @@ def _safe_queue_snapshot() -> list[dict]:
 @app.get("/statistics")
 async def download_statistics():
     raise NotImplementedError
-
 
 
 @app.post("/statistics/clear")
@@ -1551,9 +1154,7 @@ async def export_backup():
 @app.post("/backup/export-file")
 async def export_backup_file(payload: dict[str, Any]):
     raise NotImplementedError
-    backup = (
-        payload.get("backup") if isinstance(payload.get("backup"), dict) else payload
-    )
+    backup = payload.get("backup") if isinstance(payload.get("backup"), dict) else payload
     try:
         path = write_export_file(
             "onthespot-backup",
@@ -1571,11 +1172,7 @@ async def import_backup(payload: dict):
     raise NotImplementedError
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Backup must be a JSON object")
-    settings = (
-        payload.get("settings")
-        if isinstance(payload.get("settings"), dict)
-        else payload
-    )
+    settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
     protected = {"_ffmpeg_bin_path", "_log_file", "_cache_dir"}
     for key, value in settings.items():
         if key in protected or str(key).startswith("_"):
@@ -1585,14 +1182,10 @@ async def import_backup(payload: dict):
         config.set(key, value)
     config.save()
     history_restored = (
-        import_history(payload.get("queue_history"))
-        if payload.get("queue_history") is not None
-        else False
+        import_history(payload.get("queue_history")) if payload.get("queue_history") is not None else False
     )
     library_restored = (
-        import_index(payload.get("library_metadata"))
-        if payload.get("library_metadata") is not None
-        else False
+        import_index(payload.get("library_metadata")) if payload.get("library_metadata") is not None else False
     )
     return {
         "success": True,
@@ -1635,9 +1228,7 @@ async def upload_youtube_auth(cookies: UploadFile):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Could not store the cookies file: {exc}"
-        ) from exc
+        raise HTTPException(status_code=500, detail=f"Could not store the cookies file: {exc}") from exc
 
     config.set("youtube_auth_mode", "cookie_file")
     config.set("youtube_cookies_browser", "")
@@ -1664,16 +1255,12 @@ async def configure_youtube_auth(authentication: YouTubeAuthentication):
     }
     mode = authentication.mode.strip().lower()
     if mode not in {"none", "browser", "cookie_file"}:
-        raise HTTPException(
-            status_code=400, detail="Unsupported YouTube authentication mode"
-        )
+        raise HTTPException(status_code=400, detail="Unsupported YouTube authentication mode")
 
     browser = (authentication.browser or "").strip().lower()
     cookie_file = (authentication.cookie_file or "").strip()
     if mode == "browser" and browser not in allowed_browsers:
-        raise HTTPException(
-            status_code=400, detail="Choose a supported browser profile"
-        )
+        raise HTTPException(status_code=400, detail="Choose a supported browser profile")
     if mode == "browser":
         try:
             await run_in_threadpool(validate_youtube_browser, browser)
@@ -1691,18 +1278,14 @@ async def configure_youtube_auth(authentication: YouTubeAuthentication):
         try:
             managed_cookie_file.unlink(missing_ok=True)
         except OSError:
-            logger.warning(
-                "Could not remove managed YouTube cookies file: %s", managed_cookie_file
-            )
+            logger.warning("Could not remove managed YouTube cookies file: %s", managed_cookie_file)
 
     config.set("youtube_auth_mode", mode)
     config.set("youtube_cookies_browser", browser if mode == "browser" else "")
     config.set("youtube_cookies_file", cookie_file if mode == "cookie_file" else "")
     config.save()
     status = "disabled" if mode == "none" else "configured"
-    notification_hook(
-        "YouTube authentication updated", f"YouTube session authentication is {status}."
-    )
+    notification_hook("YouTube authentication updated", f"YouTube session authentication is {status}.")
     return {"success": True, **(await run_in_threadpool(youtube_auth_status))}
 
 
@@ -1778,9 +1361,7 @@ async def complete_spotify_companion_pairing(payload: SpotifyCompanionLogin):
     with _spotify_companion_pairing_lock:
         expires_at = _spotify_companion_pairings.pop(token, None)
     if not expires_at or expires_at < time.time():
-        raise HTTPException(
-            status_code=401, detail="The companion pairing code is invalid or expired"
-        )
+        raise HTTPException(status_code=401, detail="The companion pairing code is invalid or expired")
 
     if not add_spotify_zeroconf_login(payload.login):
         raise HTTPException(
@@ -1856,16 +1437,10 @@ async def get_account_health():
         if isinstance(account, dict) and account.get("active", True)
     ]
     authenticated_services = {
-        account.get("service")
-        for account in account_pool
-        if isinstance(account, dict) and account.get("active", True)
+        account.get("service") for account in account_pool if isinstance(account, dict) and account.get("active", True)
     }
     configured_services = {account.get("service") for account in configured}
-    missing_services = sorted(
-        service
-        for service in configured_services
-        if service not in authenticated_services
-    )
+    missing_services = sorted(service for service in configured_services if service not in authenticated_services)
     spotify_online = "spotify" in authenticated_services
     return {
         "healthy": bool(configured) and not missing_services,
@@ -1874,11 +1449,7 @@ async def get_account_health():
             "connected": spotify_online,
             "status": "Connected"
             if spotify_online
-            else (
-                "Not configured"
-                if "spotify" not in configured_services
-                else "Needs reconnect"
-            ),
+            else ("Not configured" if "spotify" not in configured_services else "Needs reconnect"),
             "connect_service": spotify_connect_status(),
         },
         "configured_accounts": len(configured),
@@ -1891,9 +1462,7 @@ async def get_account_health():
 @app.post("/accounts/reconnect")
 async def reconnect_accounts():
     await run_in_threadpool(relogin)
-    notification_hook(
-        "Reconnecting accounts", "The account pool is refreshing in the background."
-    )
+    notification_hook("Reconnecting accounts", "The account pool is refreshing in the background.")
     return {"success": True}
 
 
@@ -1916,10 +1485,7 @@ async def get_system_diagnostics():
     except OSError:
         disk = {"total": 0, "free": 0, "used": 0}
     rate_limit = get_rate_limit_state()
-    spotify_rate_limited = (
-        bool(rate_limit.get("active"))
-        and "spotify" in str(rate_limit.get("host") or "").casefold()
-    )
+    spotify_rate_limited = bool(rate_limit.get("active")) and "spotify" in str(rate_limit.get("host") or "").casefold()
     spotify_api_status = "Rate limited" if spotify_rate_limited else "ND"
     return {
         "backend": {"status": "online", "version": config.get("version")},
@@ -1927,9 +1493,7 @@ async def get_system_diagnostics():
             "parsing": parsing_worker.thread.is_alive(),
             "downloads": downloadworker.thread.is_alive(),
             "accounts": bool(account_pool),
-            "retry": retryworker.thread.is_alive()
-            if config.get("enable_retry_worker")
-            else False,
+            "retry": retryworker.thread.is_alive() if config.get("enable_retry_worker") else False,
         },
         "queue": {
             "pending": pending.qsize(),
@@ -1949,9 +1513,7 @@ async def get_system_diagnostics():
             "connected": False,
             "status": spotify_api_status,
             "rate_limited": spotify_rate_limited,
-            "seconds_remaining": int(rate_limit.get("seconds_remaining") or 0)
-            if spotify_rate_limited
-            else 0,
+            "seconds_remaining": int(rate_limit.get("seconds_remaining") or 0) if spotify_rate_limited else 0,
             "connect_service": [],
         },
     }
@@ -2057,9 +1619,7 @@ async def sse_endpoint(user_id: str, request: Request):
 # The production UI is built by Vite into ui/dist and served by this same
 # FastAPI process. Set ONTHESPOT_WEBUI_DIST when the files live elsewhere.
 _workspace_root = Path(__file__).resolve().parents[3]
-_ui_dist = Path(
-    os.environ.get("ONTHESPOT_WEBUI_DIST") or _workspace_root / "ui" / "dist"
-)
+_ui_dist = Path(os.environ.get("ONTHESPOT_WEBUI_DIST") or _workspace_root / "ui" / "dist")
 if _ui_dist.is_dir():
     app.mount("/", StaticFiles(directory=str(_ui_dist), html=True), name="web-ui")
 

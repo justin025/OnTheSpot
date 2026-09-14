@@ -1,6 +1,32 @@
 from base64 import b64decode
 from enum import Enum
 
+_SEARCH_FILTER_TYPES = {
+    "tracks": ("track",),
+    "albums": ("album",),
+    "playlists": ("playlist",),
+    "artists": ("artist",),
+    "podcasts": ("show", "episode"),
+    "movies": ("movie", "show", "episode"),
+}
+
+# Search categories are user-facing concepts, while each provider accepts a
+# different set of API types.  Keep the mapping provider-specific so enabling
+# Movies cannot send Spotify an unsupported ``movie`` type (which causes the
+# whole Spotify search request to fail), and so audio providers are not asked
+# for Crunchyroll video results.
+_SEARCH_SERVICE_FILTER_KEYS = {
+    "apple_music": {"tracks", "albums", "playlists", "artists"},
+    "bandcamp": {"tracks", "albums", "artists"},
+    "crunchyroll": {"movies"},
+    "deezer": {"tracks", "albums", "playlists", "artists"},
+    "qobuz": {"tracks", "albums", "playlists", "artists"},
+    "soundcloud": {"tracks", "albums", "playlists", "artists"},
+    "spotify": {"tracks", "albums", "playlists", "artists", "podcasts"},
+    "tidal": {"tracks", "albums", "playlists", "artists"},
+    "youtube_music": {"tracks"},
+}
+
 
 class ItemStatus(str, Enum):
     """Status values for items in the download queue.
